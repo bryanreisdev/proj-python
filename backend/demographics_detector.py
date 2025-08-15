@@ -275,7 +275,7 @@ class AdvancedAgeDetector:
             age_cfg = getattr(Config, 'AGE_CONFIG', {})
             out_type = age_cfg.get('tflite_age_output_type', 'auto')
 
-            # Quantizado uint8
+
             if in_dtype and 'uint8' in str(in_dtype).lower():
                 q_scale = float(inp.get('quantization_parameters', {}).get('scales', [1.0])[0] or 1.0)
                 q_zero = int(inp.get('quantization_parameters', {}).get('zero_points', [0])[0] or 0)

@@ -1,0 +1,25 @@
+
+services:
+  backend:
+    build: ./backend
+    environment:
+      - FLASK_ENV=production
+      - FLASK_DEBUG=false
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+    ports:
+      - "5000:5000"
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  redis_data:
