@@ -1,0 +1,20 @@
+flask==2.3.3
+qrcode[pil]==7.4.2
+flask-cors==4.0.0
+opencv-python==4.8.1.78
+numpy==1.24.3
+redis==5.0.1
+geoip2==4.7.0
+user-agents==2.2.0
+tflite-runtime==2.13.0 ; platform_system == "Linux"
+setuptools>=68.0.0
+wheel>=0.41.0
+gunicorn==21.2.0
+
+
+
+
+
+
+
+
