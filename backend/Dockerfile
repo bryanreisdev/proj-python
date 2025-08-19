@@ -14,8 +14,7 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir --extra-index-url https://google-coral.github.io/py-repo/ tflite-runtime==2.14.0
+    && pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 

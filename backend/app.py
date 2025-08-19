@@ -37,6 +37,59 @@ url_shortener = URLShortener()
 analytics_manager = AnalyticsManager(cache_manager)
 demographics_detector = AdvancedDemographicsDetector()
 
+def _log_runtime_info():
+    try:
+        import importlib
+        info = {}
+ 
+        try:
+            tflite_spec = importlib.util.find_spec('tflite_runtime')
+            if tflite_spec is not None:
+                import tflite_runtime as tr
+                info['tflite_runtime_version'] = getattr(tr, '__version__', 'unknown')
+            else:
+                info['tflite_runtime_version'] = 'not installed'
+        except Exception as e:
+            info['tflite_runtime_error'] = str(e)
+
+      
+        model_paths = []
+        try:
+            from config import Config
+            age_cfg = getattr(Config, 'AGE_CONFIG', {})
+            gender_cfg = getattr(Config, 'GENDER_CONFIG', {})
+            if age_cfg.get('tflite_age_model_path'):
+                model_paths.append(('age_model', age_cfg.get('tflite_age_model_path')))
+            if gender_cfg.get('tflite_gender_model_path'):
+                model_paths.append(('gender_model', gender_cfg.get('tflite_gender_model_path')))
+        except Exception:
+            pass
+        checksums = {}
+        for name, path in model_paths:
+            try:
+                with open(path, 'rb') as f:
+                    checksums[name] = hashlib.sha256(f.read()).hexdigest()[:16]
+            except Exception as e:
+                checksums[name] = f'error:{e}'
+        info['model_checksums'] = checksums
+
+
+        try:
+            from config import Config
+            info['age_min_adult_no_child'] = getattr(Config, 'AGE_CONFIG', {}).get('min_adult_age_without_strong_child_evidence')
+            info['age_child_prob_vote_threshold'] = getattr(Config, 'AGE_CONFIG', {}).get('child_prob_vote_threshold')
+            info['age_child_cap_strict_votes'] = getattr(Config, 'AGE_CONFIG', {}).get('child_cap_strict_votes')
+            info['gender_global_threshold'] = getattr(Config, 'GENDER_CONFIG', {}).get('global_threshold')
+        except Exception:
+            pass
+
+        print(f"[RUNTIME] {info}")
+    except Exception as e:
+        print(f"[RUNTIME] log error: {e}")
+
+
+_log_runtime_info()
+
 
 @app.route("/api/qrcode", methods=["POST"])
 def generate_qr():
