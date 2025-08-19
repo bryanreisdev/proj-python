@@ -10,6 +10,9 @@ services:
       - REDIS_DB=0
     ports:
       - "80:5000"
+    volumes:
+      - ./backend:/app
+      - ./models:/app/models
     depends_on:
       - redis
     restart: unless-stopped
