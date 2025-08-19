@@ -15,6 +15,8 @@ class Config:
     }
     
     SHORT_URL_LENGTH = 6
+    # Base URL opcional para o serviço de encurtamento. Se definido, será usado no lugar do host da requisição
+    SHORT_BASE_URL = os.environ.get('SHORT_BASE_URL')
     
     FLASK_DEBUG = os.environ.get('FLASK_DEBUG', 'True').lower() == 'true'
     FLASK_HOST = os.environ.get('FLASK_HOST', '0.0.0.0')

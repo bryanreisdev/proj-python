@@ -8,6 +8,7 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_DB=0
+      - SHORT_BASE_URL=https://iatools.fun/
     ports:
       - "80:5000"
     volumes:

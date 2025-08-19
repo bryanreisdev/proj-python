@@ -185,14 +185,34 @@ def shorten_url():
         url_cache_key = cache_manager.generate_key('url_mapping', url)
         cached_short = cache_manager.get(url_cache_key)
         
+        
+        def _determine_base_url(req) -> str:
+          
+            if getattr(Config, 'SHORT_BASE_URL', None):
+                base = Config.SHORT_BASE_URL.strip()
+                if not base.endswith('/'):
+                    base += '/'
+                return base
+
+           
+            xf_host = req.headers.get('X-Forwarded-Host')
+            xf_proto = req.headers.get('X-Forwarded-Proto')
+            if xf_host and xf_proto:
+                return f"{xf_proto}://{xf_host}/"
+
+         
+            return req.host_url
+
+        base_url = _determine_base_url(request)
+
         if cached_short:
             return jsonify({
-                'short_url': request.host_url + 's/' + cached_short['short_id'],
+                'short_url': base_url + 's/' + cached_short['short_id'],
                 'cached': True,
                 'created_at': cached_short.get('created_at')
             })
         
-        short_data = url_shortener.create_short_url(url, request.host_url)
+        short_data = url_shortener.create_short_url(url, base_url)
         
         cache_manager.set(url_cache_key, short_data, expire_hours=8760)
         cache_manager.set(f"short_id:{short_data['short_id']}", short_data, expire_hours=8760)
