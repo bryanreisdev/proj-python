@@ -19,4 +19,4 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
 COPY . .
 
 EXPOSE 5000
-CMD ["gunicorn", "-w", "2", "-k", "gthread", "--threads", "4", "-b", "0.0.0.0:5000", "--timeout", "300", "--graceful-timeout", "300", "app:app"]
+CMD ["gunicorn", "-w", "2", "-k", "gthread", "--threads", "2", "-b", "0.0.0.0:5000", "--timeout", "300", "--graceful-timeout", "300", "app:app"]
