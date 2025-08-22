@@ -7,7 +7,6 @@ import hashlib
 import math
 try:
     import tensorflow as tf
-    # Configurações para otimizar TensorFlow e reduzir retracing
     tf.config.experimental.enable_op_determinism()
     if tf.config.list_physical_devices('GPU'):
         tf.config.experimental.set_memory_growth(tf.config.list_physical_devices('GPU')[0], True)
@@ -4188,65 +4187,8 @@ class AdvancedDemographicsDetector:
                 faces = self._detect_faces_advanced(img_enhanced)
             
             if len(faces) == 0:
-                print("🔄 Tentando métodos alternativos...")
-                
-                alternative_methods = [
-                    lambda x: cv2.GaussianBlur(x, (3, 3), 0),
-                    lambda x: cv2.medianBlur(x, 3)
-                ]
-                
-                for i, method in enumerate(alternative_methods):
-                    try:
-                        processed_img = method(img)
-                        faces = self._detect_faces_advanced(processed_img)
-                        if len(faces) > 0:
-                            print(f"✅ {len(faces)} face(s) detectada(s) com método alternativo {i+1}")
-                            break
-                    except Exception as e:
-                        print(f"Erro no método alternativo {i+1}: {e}")
-                        continue
-                
-                if len(faces) == 0:
-                    print("🔄 Última tentativa com detecção ultra-sensível...")
-                    try:
-                        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                        
-                        ultra_faces = self.face_cascade.detectMultiScale(
-                            gray,
-                            scaleFactor=1.05,
-                            minNeighbors=1,
-                            minSize=(20, 20),
-                            maxSize=(img.shape[1], img.shape[0])
-                        )
-                        
-                        if len(ultra_faces) > 0:
-                            best_faces = []
-                            for (x, y, w, h) in ultra_faces:
-                                if w > 30 and h > 30:
-                                    face_region = gray[y:y+h, x:x+w]
-                                    if face_region.size > 0:
-                                        quality = self._assess_face_region_quality_strict(face_region)
-                                        if quality > 0.2:
-                                            best_faces.append((x, y, w, h, quality))
-                            
-                            if best_faces:
-                                best_face = max(best_faces, key=lambda x: x[4])
-                                x, y, w, h, quality = best_face
-                                
-                                face_img = img[y:y+h, x:x+w]
-                                face_gray = gray[y:y+h, x:x+w]
-                                
-                                faces = [{
-                                    'image': face_img,
-                                    'gray': face_gray,
-                                    'rect': (x, y, w, h),
-                                    'original_rect': (x, y, w, h),
-                                    'quality': quality
-                                }]
-                                print(f"✅ 1 face detectada com método ultra-sensível (qualidade: {quality:.2f})")
-                            
-                    except Exception as e:
-                        print(f"Erro na detecção ultra-sensível: {e}")
+                # Modo rápido: pular métodos alternativos e detecção ultra-sensível
+                print("⚠️ Modo rápido: pulando métodos alternativos e detecção ultra-sensível")
             
             if len(faces) == 0:
                 error_msg = (
@@ -4263,17 +4205,57 @@ class AdvancedDemographicsDetector:
             
             print(f"👥 {len(faces)} face(s) detectada(s) e validada(s)")
             
-            results = []
-            for i, face_data in enumerate(faces):
-                print(f"🔍 Analisando face {i+1}/{len(faces)}")
-                face_img = face_data['image']
-                face_gray = face_data['gray']
-                face_rect = face_data['rect']
-                
-                demographics = self._analyze_single_face(face_img, face_gray, face_rect)
-                demographics['face_id'] = i + 1
-                demographics['detection_quality'] = face_data.get('quality', 0.5)
-                results.append(demographics)
+            # Processamento assíncrono controlado para reduzir memória
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            try:
+                try:
+                    from config import Config
+                    max_workers = int(getattr(getattr(Config, 'FACE_DETECTION_CONFIG', {}), 'get', lambda *_: None)('analysis_max_workers') or getattr(Config, 'ANALYSIS_MAX_WORKERS', 2))
+                except Exception:
+                    max_workers = 2
+
+                max_workers = max(1, min(4, int(max_workers)))
+
+                results = []
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_index = {}
+                    for i, face_data in enumerate(faces):
+                        print(f"🔍 Analisando face {i+1}/{len(faces)} (workers={max_workers})")
+                        face_img = face_data['image']
+                        face_gray = face_data['gray']
+                        face_rect = face_data['rect']
+
+                        future = executor.submit(self._analyze_single_face, face_img, face_gray, face_rect)
+                        future_to_index[future] = (i, face_data.get('quality', 0.5))
+
+                    for future in as_completed(future_to_index):
+                        i, quality = future_to_index[future]
+                        try:
+                            demographics = future.result()
+                        except Exception as _e:
+                            print(f"Erro ao analisar face {i+1}: {_e}")
+                            demographics = self._get_default_analysis()
+                        demographics['face_id'] = i + 1
+                        demographics['detection_quality'] = quality
+                        results.append(demographics)
+                        # liberar referências cedo
+                        try:
+                            faces[i]['image'] = None
+                            faces[i]['gray'] = None
+                        except Exception:
+                            pass
+            except Exception as _pool_e:
+                print(f"Aviso: fallback para processamento sequencial: {_pool_e}")
+                results = []
+                for i, face_data in enumerate(faces):
+                    print(f"🔍 Analisando face {i+1}/{len(faces)} (fallback)")
+                    face_img = face_data['image']
+                    face_gray = face_data['gray']
+                    face_rect = face_data['rect']
+                    demographics = self._analyze_single_face(face_img, face_gray, face_rect)
+                    demographics['face_id'] = i + 1
+                    demographics['detection_quality'] = face_data.get('quality', 0.5)
+                    results.append(demographics)
             
             summary = self._generate_summary(results)
             
@@ -4379,7 +4361,8 @@ class AdvancedDemographicsDetector:
             
             all_faces = []
             
-            for config in primary_configs:
+            # Modo rápido: tentar apenas a primeira configuração principal
+            for config in primary_configs[:1]:
                 try:
                     faces = config['cascade'].detectMultiScale(
                         gray,
@@ -4400,9 +4383,10 @@ class AdvancedDemographicsDetector:
                     continue
             
             if len(all_faces) == 0:
-                print("🔍 Tentando com imagem aprimorada...")
+                print("🔍 Tentando com imagem aprimorada (modo rápido)...")
                 
-                for config in primary_configs:
+                # Modo rápido: apenas a primeira configuração com imagem aprimorada
+                for config in primary_configs[:1]:
                     try:
                         faces = config['cascade'].detectMultiScale(
                             gray_enhanced,
@@ -4422,36 +4406,24 @@ class AdvancedDemographicsDetector:
                         continue
             
             if len(all_faces) == 0:
-                print("🔍 Tentando configurações mais sensíveis...")
-                
-                sensitive_configs = [
-                    {
-                        'scale_factor': 1.08,
-                        'min_neighbors': 3,
-                        'min_size': (30, 30),
-                        'max_size': (int(img.shape[1]*0.7), int(img.shape[0]*0.7))
-                    },
-                    {
-                        'scale_factor': 1.2,
-                        'min_neighbors': 2,
-                        'min_size': (25, 25),
-                        'max_size': (int(img.shape[1]*0.5), int(img.shape[0]*0.5))
-                    }
-                ]
-                
-                for config in sensitive_configs:
-                    faces = self.face_cascade.detectMultiScale(
-                        gray_enhanced,
-                        scaleFactor=config['scale_factor'],
-                        minNeighbors=config['min_neighbors'],
-                        minSize=config['min_size'],
-                        maxSize=config['max_size']
-                    )
-                    
-                    if len(faces) > 0:
-                        all_faces.extend(faces)
-                        print(f"✅ {len(faces)} face(s) detectada(s) com configuração sensível")
-                        break
+                # Modo rápido: uma única configuração sensível e só
+                print("🔍 Tentando uma configuração mais sensível (modo rápido)...")
+                config = {
+                    'scale_factor': 1.08,
+                    'min_neighbors': 3,
+                    'min_size': (30, 30),
+                    'max_size': (int(img.shape[1]*0.7), int(img.shape[0]*0.7))
+                }
+                faces = self.face_cascade.detectMultiScale(
+                    gray_enhanced,
+                    scaleFactor=config['scale_factor'],
+                    minNeighbors=config['min_neighbors'],
+                    minSize=config['min_size'],
+                    maxSize=config['max_size']
+                )
+                if len(faces) > 0:
+                    all_faces.extend(faces)
+                    print(f"✅ {len(faces)} face(s) detectada(s) com configuração sensível (modo rápido)")
             
             if len(all_faces) > 0:
                 # Unir/mesclar detecções redundantes do mesmo rosto

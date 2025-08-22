@@ -1,4 +1,5 @@
 from flask import Flask, request, send_file, jsonify, redirect
+import concurrent.futures
 import io
 import base64
 import hashlib
@@ -396,8 +397,17 @@ def detect_demographics():
             cached_result['from_cache'] = True
             return jsonify(cached_result)
         
-        # Analisar demografia
-        result = demographics_detector.analyze_demographics(image_data)
+        # Analisar demografia com timeout usando ThreadPoolExecutor
+        TIMEOUT_SECONDS = int(getattr(Config, 'DEMOGRAPHICS_TIMEOUT_SECONDS', 240))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(demographics_detector.analyze_demographics, image_data)
+            try:
+                result = future.result(timeout=TIMEOUT_SECONDS)
+            except concurrent.futures.TimeoutError:
+                return jsonify({
+                    'error': 'Análise demográfica excedeu o tempo limite. Tente com uma imagem menor ou mais simples.',
+                    'error_code': 'TIMEOUT'
+                }), 408
         
         # Salvar no cache (24 horas)
         cache_manager.set(cache_key, result, expire_hours=24)
