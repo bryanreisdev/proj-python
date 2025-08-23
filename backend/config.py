@@ -31,7 +31,7 @@ class Config:
    
     GENDER_CONFIG = {
         'tflite_only': True,
-        'global_threshold': 0.537,
+        'global_threshold': 0.54,
         'tflite_input_size': 96, 
         'tflite_output_order': 'male_female',  
         'invert_output':False, 
@@ -113,7 +113,7 @@ class Config:
 }
 
     AGE_CONFIG = {
-        'tflite_only': False,
+        'tflite_only': True,
         'use_ensemble_with_tflite': True, 
         'age_margin_default': 2,
         'age_margin_child': 2,
@@ -121,7 +121,7 @@ class Config:
 
 
         'child_cap_enabled': False,
-        'child_cap_prob_threshold': 0.82,
+        'child_cap_prob_threshold': 0.87,
         'child_cap_min_votes': 3,
         'child_cap_strict_votes': 4,
         'child_cap_max_age': 16,
@@ -129,7 +129,7 @@ class Config:
 
         'elderly_cap_enabled': True,
         'elderly_cap_prob_threshold': 0.75,
-        'elderly_cap_min_votes': 3,
+        'elderly_cap_min_votes': 4,
         'elderly_cap_strict_votes': 4,
         'elderly_cap_min_age': 67,
         'elderly_cap_weighted_floor': 60,
@@ -156,22 +156,22 @@ class Config:
 
         # Regras do ensemble para idade: reduzir peso de textura/tradicional
         'ensemble_method_weights': {
-            'tflite_age_regression': 0.60,
-            'tflite_age_classes': 0.60,
+            'tflite_age_regression': 0.70,
+            'tflite_age_classes': 0.70,
             'cnn_age_regression': 0.30,
             'facenet_age': 0.30,
-            'texture_analysis_enhanced': 0.04,
-            'traditional_enhanced': 0.02
+            'texture_analysis_enhanced': 0.02,
+            'traditional_enhanced': 0.01
         },
 
         # Votos/limiares adicionais usados no ensemble
-        'child_prob_vote_threshold': 0.70,
-        'elderly_prob_vote_threshold': 0.75,
-        'child_indicators_vote_threshold': 3.0,
-        'elderly_indicators_vote_threshold': 5.0,
+        'child_prob_vote_threshold': 0.78,
+        'elderly_prob_vote_threshold': 0.82,
+        'child_indicators_vote_threshold': 3.5,
+        'elderly_indicators_vote_threshold': 6.0,
 
         # Salvaguarda: não retornar <18 sem evidência infantil forte
-        'min_adult_age_without_strong_child_evidence': 18,
+        'min_adult_age_without_strong_child_evidence': 21,
     }
 
     FACE_DETECTION_CONFIG = {

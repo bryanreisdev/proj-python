@@ -6,30 +6,39 @@ from typing import Dict, List, Any, Tuple
 import hashlib
 import math
 try:
-    import tensorflow as tf
-    tf.config.experimental.enable_op_determinism()
-    if tf.config.list_physical_devices('GPU'):
-        tf.config.experimental.set_memory_growth(tf.config.list_physical_devices('GPU')[0], True)
-    
-    from tensorflow import keras
-    from keras_facenet import FaceNet
-    from mtcnn import MTCNN
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.svm import SVC
-    from sklearn.neural_network import MLPClassifier
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.model_selection import train_test_split
-    import pickle
-    import os
-    
-    ML_AVAILABLE = True
-    print(f"✅ TensorFlow {tf.__version__} otimizado disponível")
-    print("✅ ML completamente carregado com otimizações")
-    
-except ImportError as e:
+    from config import Config
+    _tflite_only_global = bool(getattr(Config, 'GENDER_CONFIG', {}).get('tflite_only', False)) and bool(getattr(Config, 'AGE_CONFIG', {}).get('tflite_only', False))
+except Exception:
+    _tflite_only_global = False
+
+if not _tflite_only_global:
+    try:
+        import tensorflow as tf
+        tf.config.experimental.enable_op_determinism()
+        if tf.config.list_physical_devices('GPU'):
+            tf.config.experimental.set_memory_growth(tf.config.list_physical_devices('GPU')[0], True)
+        
+        from tensorflow import keras
+        from keras_facenet import FaceNet
+        from mtcnn import MTCNN
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.svm import SVC
+        from sklearn.neural_network import MLPClassifier
+        from sklearn.preprocessing import StandardScaler
+        from sklearn.model_selection import train_test_split
+        import pickle
+        import os
+        
+        ML_AVAILABLE = True
+        print(f"✅ TensorFlow {tf.__version__} otimizado disponível")
+        print("✅ ML completamente carregado com otimizações")
+    except ImportError as e:
+        ML_AVAILABLE = False
+        print(f"❌ ML não disponível: {e}")
+        print("🔄 Usando métodos tradicionais")
+else:
     ML_AVAILABLE = False
-    print(f"❌ ML não disponível: {e}")
-    print("🔄 Usando métodos tradicionais")
+    print("ℹ️ tflite_only=True para AGE e GENDER: não carregando TensorFlow completo")
 
 class AdvancedAgeDetector:
     def __init__(self):
@@ -4174,6 +4183,21 @@ class AdvancedDemographicsDetector:
             print(f"📊 Iniciando análise demográfica (ID: {cache_key})")
             
             img = self._decode_image(image_data)
+            # Downscale agressivo para economizar memória/CPU (ex.: 1024px máx)
+            try:
+                h, w = img.shape[:2]
+                max_dim = 1024
+                if max(h, w) > max_dim:
+                    if h >= w:
+                        new_h = max_dim
+                        new_w = int(w * (max_dim / h))
+                    else:
+                        new_w = max_dim
+                        new_h = int(h * (max_dim / w))
+                    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                    print(f"↘️ Downscale: {w}x{h} -> {new_w}x{new_h}")
+            except Exception as _r:
+                pass
             print(f"🖼️  Imagem decodificada: {img.shape[1]}x{img.shape[0]} pixels")
             
             if img.shape[0] < 150 or img.shape[1] < 150:
@@ -4275,6 +4299,11 @@ class AdvancedDemographicsDetector:
             }
             
             final_result = convert_numpy_types(result)
+            # Libera imagem e faces (buffers grandes)
+            try:
+                del img, faces
+            except Exception:
+                pass
             self._analysis_cache[cache_key] = final_result
             
             print(f"✅ Análise concluída com sucesso (ID: {cache_key})")
@@ -4834,23 +4863,31 @@ class AdvancedDemographicsDetector:
                 child_indicators += 1.0
             elif face_brightness < 120:
                 elderly_indicators += 0.5
+
+            try:
+                quality_gate = float(self._assess_image_quality(face_img))
+            except Exception:
+                quality_gate = 0.5
+            if quality_gate < 0.6:
+                elderly_indicators *= 0.7
+                child_indicators *= 0.7
             
             # Reforço por cabelo grisalho/branco
             gray_hair_score = self._detect_gray_hair(face_img, face_gray)
 
             base_age = 30
             
-            if child_indicators > 3.0:
+            if child_indicators > 3.8:
                 if child_indicators > 5.0:
                     estimated_age = max(3, min(12, int(8 - child_indicators * 0.5)))
                 else:
                     estimated_age = max(8, min(18, int(20 - child_indicators * 2)))
                 confidence_modifier = 0.15
             
-            elif elderly_indicators > 4.0:
-                if elderly_indicators > 8.0:
+            elif elderly_indicators > 6.5:
+                if elderly_indicators > 8.5:
                     estimated_age = max(70, min(95, int(55 + elderly_indicators * 3.5)))
-                elif elderly_indicators > 6.0:
+                elif elderly_indicators > 7.5:
                     estimated_age = max(60, min(85, int(45 + elderly_indicators * 4)))
                 else:
                     estimated_age = max(50, min(75, int(35 + elderly_indicators * 5)))
@@ -4864,6 +4901,10 @@ class AdvancedDemographicsDetector:
                 estimated_age = max(18, min(65, int(age_score)))
                 confidence_modifier = 0.0
             
+            if 19 <= estimated_age <= 26 and child_indicators < 4.2:
+                estimated_age = max(20, estimated_age)
+            if 58 <= estimated_age <= 65 and elderly_indicators < 7.0:
+                estimated_age = min(60, estimated_age)
             estimated_age = max(1, min(100, estimated_age))
             
             age_category = 'Jovem Adulto'
@@ -5120,6 +5161,39 @@ class AdvancedDemographicsDetector:
                     eye_shape = 'Amendoado'
                 elif eye_ratio < 1.8:
                     eye_shape = 'Redondo'
+                try:
+                    eye_roi_bgr = face_img[max(ey,0):ey+eh, max(ex,0):ex+ew]
+                    if eye_roi_bgr.size > 0:
+                        eye_hsv = cv2.cvtColor(eye_roi_bgr, cv2.COLOR_BGR2HSV)
+                        h, s, v = cv2.split(eye_hsv)
+                        mask_dark = (v < 130)
+                        mask_color = (s > 40)
+                        mask = (mask_dark & mask_color)
+                        if np.count_nonzero(mask) < 50:
+                            mask = (v < 150)
+                        if np.count_nonzero(mask) > 0:
+                            hue_vals = h[mask]
+                            sat_vals = s[mask]
+                            val_vals = v[mask]
+                            mean_h = float(np.mean(hue_vals))
+                            mean_s = float(np.mean(sat_vals))
+                            mean_v = float(np.mean(val_vals))
+                            if mean_v < 70:
+                                eye_color = 'Preto'
+                            else:
+                                if mean_s < 60:
+                                    eye_color = 'Castanho'
+                                else:
+                                    if 15 <= mean_h <= 45:
+                                        eye_color = 'Âmbar'
+                                    elif 45 < mean_h <= 85:
+                                        eye_color = 'Verde'
+                                    elif (85 < mean_h <= 130) or (mean_h < 10):
+                                        eye_color = 'Azul'
+                                    else:
+                                        eye_color = 'Castanho'
+                except Exception:
+                    pass
             
             return {
                 'formato_rosto': face_shape,
@@ -5200,13 +5274,36 @@ class AdvancedDemographicsDetector:
             eyes = self.eye_cascade.detectMultiScale(face_gray, 1.1, 5)
             eye_openness = 0.8 if len(eyes) > 0 else 0.3
             
-            expressions = ['Sorridente'] if has_smile else ['Neutro']
+            # Heurísticas simples para pontuar emoções
+            # Baseadas em abertura dos olhos e presença de sorriso
+            scores = {
+                'Feliz': 1.2 * (1.0 if has_smile else 0.2) + 0.2 * eye_openness,
+                'Surpresa': 0.3 * (1.0 if has_smile else 0.0) + 1.1 * eye_openness,
+                'Neutro': 0.6 * (1.0 - abs(eye_openness - 0.5)),
+                'Triste': 0.5 * (1.0 - eye_openness) + (0.1 if not has_smile else 0.0),
+                'Raiva': 0.25 * (1.0 - eye_openness) + (0.05 if not has_smile else 0.0),
+                'Nojo': 0.15 * (1.0 - eye_openness),
+                'Medo': 0.35 * eye_openness
+            }
+            # Normalização tipo softmax simples
+            import numpy as _np
+            vals = _np.array(list(scores.values()), dtype=_np.float64)
+            vals = vals - vals.max()
+            exp = _np.exp(vals)
+            probs_arr = exp / (exp.sum() if exp.sum() > 0 else 1.0)
+            emotions = list(scores.keys())
+            probabilities = {k: float(v) for k, v in zip(emotions, probs_arr)}
+            top3 = sorted(probabilities.items(), key=lambda kv: kv[1], reverse=True)[:3]
+            top_label, top_prob = top3[0]
+            expressions = [top_label] if has_smile and top_label != 'Feliz' else ([top_label] if top_prob > 0.4 else ['Neutro'])
             
             return {
                 'expressions': expressions,
                 'has_smile': has_smile,
                 'eye_openness': float(eye_openness),
-                'confidence': 0.6
+                'confidence': float(top_prob),
+                'probabilities': probabilities,
+                'top3': [{'emotion': e, 'prob': float(p)} for e, p in top3]
             }
         except Exception as e:
             print(f"Erro na análise de expressão: {e}")
@@ -5233,7 +5330,13 @@ class AdvancedDemographicsDetector:
     
     def _generate_summary(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         try:
-            ages = [r['age']['estimated_age'] for r in results if 'age' in r]
+            ages = [
+                r['age'].get('estimated_age')
+                for r in results
+                if 'age' in r and isinstance(r.get('age', {}).get('estimated_age'), (int, float))
+                and r.get('age', {}).get('estimated_age') not in (None,)
+                and r.get('age', {}).get('confidence', 0.0) > 0.0
+            ]
             
             # CORREÇÃO: Verificar múltiplos campos de gênero
             genders = []
@@ -5262,7 +5365,7 @@ class AdvancedDemographicsDetector:
                     ethnicity_list.append(r['ethnicity']['predicted_ethnicity'])
             
             return {
-                'idade_media': int(np.mean(ages)) if ages else 30,
+                'idade_media': int(np.mean(ages)) if ages else 0,
                 'distribuicao_genero': {
                     'masculino': male_count,
                     'feminino': female_count,
@@ -5285,7 +5388,7 @@ class AdvancedDemographicsDetector:
     
     def _get_default_analysis(self) -> Dict[str, Any]:
         return {
-            'age': {'estimated_age': 30, 'category': 'Jovem Adulto', 'confidence': 0.3},
+            'age': {'estimated_age': None, 'category': 'Indefinido', 'confidence': 0.0},
             'gender': {'predicted_gender': 'Indefinido', 'confidence': 0.3},
             'facial_features': {'formato_rosto': 'Oval', 'confidence': 0.3},
             'ethnicity': {'predicted_ethnicity': 'Indefinido', 'confidence': 0.3},

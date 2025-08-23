@@ -13,6 +13,8 @@ class CacheManager:
         self.cache_type = None
         self.url_map = {}
         self.cache_file = 'cache_data.json'
+        self.max_items = int(os.getenv('CACHE_MAX_ITEMS', '500'))
+        self.max_value_bytes = int(os.getenv('CACHE_MAX_VALUE_BYTES', '524288'))  # 512KB
         self._initialize_cache()
     
     def _initialize_cache(self):
@@ -75,9 +77,24 @@ class CacheManager:
     
     def set(self, key: str, value: Dict[Any, Any], expire_hours: int = 24) -> bool:
         try:
+            # Pular objetos muito grandes no cache em memória/disco
+            try:
+                est_size = len(json.dumps(value))
+                if est_size > self.max_value_bytes:
+                    return False
+            except Exception:
+                pass
+
             if self.cache_type == 'redis':
                 self.cache.setex(key, timedelta(hours=expire_hours), json.dumps(value))
             else:
+                # Evitar crescimento ilimitado do cache em memória
+                if len(self.cache) >= self.max_items:
+                    try:
+                        oldest_key = next(iter(self.cache.keys()))
+                        del self.cache[oldest_key]
+                    except Exception:
+                        self.cache.clear()
                 self.cache[key] = {
                     'value': value,
                     'expires': (datetime.now() + timedelta(hours=expire_hours)).isoformat()

@@ -1,4 +1,6 @@
 from flask import Flask, request, send_file, jsonify, redirect
+import os
+import gc
 import concurrent.futures
 import io
 import base64
@@ -6,12 +8,16 @@ import hashlib
 from flask_cors import CORS
 from config import Config
 from cache_manager import CacheManager
-from emotion_detector import EmotionDetector
 from url_services import QRCodeGenerator, URLShortener
 from utils import InputValidator
 from datetime import datetime
 from analytics_manager import AnalyticsManager
 from demographics_detector import AdvancedDemographicsDetector
+
+
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+os.environ.setdefault('MKL_NUM_THREADS', '1')
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
@@ -32,7 +38,6 @@ def bad_request(e):
     }), 400
 
 cache_manager = CacheManager()
-emotion_detector = EmotionDetector()
 qr_generator = QRCodeGenerator()
 url_shortener = URLShortener()
 analytics_manager = AnalyticsManager(cache_manager)
@@ -238,7 +243,7 @@ def redirect_short_url(short_id):
         cached_data = cache_manager.get(f"short_id:{short_id}")
         
         if cached_data:
-            # Registrar analytics
+          
             request_data = {
                 'ip': request.environ.get('HTTP_X_FORWARDED_FOR', request.environ.get('REMOTE_ADDR', 'unknown')),
                 'user_agent': request.environ.get('HTTP_USER_AGENT', 'unknown'),
@@ -246,7 +251,7 @@ def redirect_short_url(short_id):
             }
             analytics_manager.log_url_access(short_id, request_data)
             
-            # Atualizar contador
+          
             updated_data = url_shortener.update_access_count(short_id, cached_data)
             cache_manager.set(f"short_id:{short_id}", updated_data, expire_hours=8760)
             
@@ -254,7 +259,7 @@ def redirect_short_url(short_id):
         
         url = url_shortener.get_original_url(short_id)
         if url:
-            # Registrar analytics mesmo para URLs não cacheadas
+         
             request_data = {
                 'ip': request.environ.get('HTTP_X_FORWARDED_FOR', request.environ.get('REMOTE_ADDR', 'unknown')),
                 'user_agent': request.environ.get('HTTP_USER_AGENT', 'unknown'),
@@ -272,29 +277,7 @@ def redirect_short_url(short_id):
         return jsonify({'error': 'Erro interno do servidor'}), 500
 
 
-@app.route("/api/emotion", methods=["POST"])
-def detect_emotion():
-    try:
-        data = request.get_json()
-        image_data = InputValidator.validate_image_data(data.get("image"))
-        
-        image_hash = hashlib.md5(image_data.encode()).hexdigest()
-        cache_key = cache_manager.generate_key('emotion', image_hash)
-        
-        cached_result = cache_manager.get(cache_key)
-        if cached_result:
-            cached_result['from_cache'] = True
-            return jsonify(cached_result)
-        
-        result = emotion_detector.process_image(image_data)
-        cache_manager.set(cache_key, result, expire_hours=24)
-        
-        return jsonify(result)
-        
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'error': f'Erro ao processar imagem: {str(e)}'}), 500
+
 
 
 @app.route("/api/cache/stats", methods=["GET"])
@@ -321,19 +304,19 @@ def clear_cache():
 
 @app.route("/api/url/<short_id>/analytics", methods=["GET"])
 def get_url_analytics(short_id):
-    """Obtém analytics detalhadas para uma URL específica"""
+   
     try:
         InputValidator.validate_short_id(short_id)
         
-        # Verificar se a URL existe
+       
         url_data = cache_manager.get(f"short_id:{short_id}")
         if not url_data:
             return jsonify({'error': 'URL não encontrada'}), 404
         
-        # Obter analytics
+       
         analytics = analytics_manager.get_url_analytics(short_id)
         
-        # Adicionar informações da URL
+       
         analytics['url_info'] = {
             'short_id': short_id,
             'original_url': url_data.get('original_url'),
@@ -351,7 +334,7 @@ def get_url_analytics(short_id):
 
 @app.route("/api/analytics/global", methods=["GET"])
 def get_global_analytics():
-    """Obtém analytics globais do sistema"""
+   
     try:
         analytics = analytics_manager.get_global_analytics()
         return jsonify(analytics)
@@ -361,9 +344,9 @@ def get_global_analytics():
 
 @app.route("/api/demographics", methods=["POST"])
 def detect_demographics():
-    """Detecta idade, gênero e características faciais"""
+
     try:
-        # Verificar tamanho do conteúdo da requisição
+       
         content_length = request.content_length
         if content_length and content_length > app.config['MAX_CONTENT_LENGTH']:
             return jsonify({
@@ -380,15 +363,15 @@ def detect_demographics():
             
         image_data = InputValidator.validate_image_data(data.get("image"))
         
-        # Verificar tamanho da imagem em base64
-        estimated_size = len(image_data) * 0.75  # Aproximação do tamanho real
-        if estimated_size > 30 * 1024 * 1024:  # 30MB em base64
+       
+        estimated_size = len(image_data) * 0.75  
+        if estimated_size > 30 * 1024 * 1024:  
             return jsonify({
                 'error': 'Imagem muito grande. Reduza o tamanho da imagem e tente novamente.',
                 'error_code': 'IMAGE_TOO_LARGE'
             }), 413
         
-        # Verificar cache
+       
         image_hash = hashlib.md5(image_data.encode()).hexdigest()
         cache_key = cache_manager.generate_key('demographics', image_hash)
         
@@ -397,7 +380,7 @@ def detect_demographics():
             cached_result['from_cache'] = True
             return jsonify(cached_result)
         
-        # Analisar demografia com timeout usando ThreadPoolExecutor
+       
         TIMEOUT_SECONDS = int(getattr(Config, 'DEMOGRAPHICS_TIMEOUT_SECONDS', 240))
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(demographics_detector.analyze_demographics, image_data)
@@ -409,11 +392,18 @@ def detect_demographics():
                     'error_code': 'TIMEOUT'
                 }), 408
         
-        # Salvar no cache (24 horas)
+       
         cache_manager.set(cache_key, result, expire_hours=24)
         
         result['from_cache'] = False
-        return jsonify(result)
+        resp = jsonify(result)
+       
+        try:
+            del data, image_data, result
+        except Exception:
+            pass
+        gc.collect()
+        return resp
         
     except ValueError as e:
         return jsonify({
@@ -430,22 +420,22 @@ def detect_demographics():
 
 @app.route("/api/analytics/dashboard", methods=["GET"])
 def get_dashboard_data():
-    """Endpoint para dados do dashboard completo"""
+
     try:
-        # Analytics globais
+       
         global_analytics = analytics_manager.get_global_analytics()
         
-        # Estatísticas do cache
+       
         cache_stats = cache_manager.get_stats()
         
-        # Combinar dados
+       
         dashboard_data = {
             'global_analytics': global_analytics,
             'cache_stats': cache_stats,
             'system_info': {
                 'timestamp': datetime.now().isoformat(),
-                'services_active': ['qr_generator', 'url_shortener', 'emotion_detector', 'demographics_detector'],
-                'total_features': 4
+                'services_active': ['qr_generator', 'url_shortener', 'demographics_detector'],
+                'total_features': 3
             }
         }
         
@@ -466,7 +456,7 @@ def get_ml_status():
             'errors': []
         }
         
-        # Testar cada componente
+        
         try:
             import importlib
             tf_spec = importlib.util.find_spec('tensorflow')
@@ -515,7 +505,7 @@ def get_ml_status():
             }
             status_info['errors'].append('scikit-learn não disponível')
         
-        # Testar detector
+
         try:
             detector = AdvancedDemographicsDetector()
             status_info['detectors'] = {

@@ -19,4 +19,8 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
 COPY . .
 
 EXPOSE 5000
-CMD ["gunicorn", "-w", "2", "-k", "gthread", "--threads", "2", "-b", "0.0.0.0:5000", "--timeout", "600", "--graceful-timeout", "600", "app:app"]
+ENV OMP_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1
+
+CMD ["gunicorn", "-w", "1", "-k", "gthread", "--threads", "2", "-b", "0.0.0.0:5000", "--timeout", "600", "--graceful-timeout", "600", "app:app"]
