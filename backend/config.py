@@ -10,13 +10,10 @@ class Config:
     
     CACHE_EXPIRY = {
         'qr_code': timedelta(days=7),
-        'url_mapping': timedelta(days=365),
         'emotion': timedelta(hours=24)
     }
     
-    SHORT_URL_LENGTH = 6
-    # Base URL opcional para o serviço de encurtamento. Se definido, será usado no lugar do host da requisição
-    SHORT_BASE_URL = os.environ.get('SHORT_BASE_URL')
+
     
     FLASK_DEBUG = os.environ.get('FLASK_DEBUG', 'True').lower() == 'true'
     FLASK_HOST = os.environ.get('FLASK_HOST', '0.0.0.0')
@@ -115,9 +112,9 @@ class Config:
     AGE_CONFIG = {
         'tflite_only': True,
         'use_ensemble_with_tflite': True, 
-        'age_margin_default': 2,
-        'age_margin_child': 2,
-        'age_margin_elderly': 3,
+        'age_margin_default': 1,
+        'age_margin_child': 1,
+        'age_margin_elderly': 2,
 
 
         'child_cap_enabled': False,
@@ -128,11 +125,11 @@ class Config:
         'child_cap_weighted_ceiling': 22,
 
         'elderly_cap_enabled': True,
-        'elderly_cap_prob_threshold': 0.75,
-        'elderly_cap_min_votes': 4,
-        'elderly_cap_strict_votes': 4,
-        'elderly_cap_min_age': 67,
-        'elderly_cap_weighted_floor': 60,
+        'elderly_cap_prob_threshold': 0.84,
+        'elderly_cap_min_votes': 3,
+        'elderly_cap_strict_votes': 5,
+        'elderly_cap_min_age': 70,
+        'elderly_cap_weighted_floor': 62,
 
   
         'child_blend_enabled': False,
@@ -147,7 +144,7 @@ class Config:
         'tflite_age_model_path': 'models/age_regression.tflite',
         'tflite_age_input_size': 96,  
         'tflite_age_threads': 2,
-        'tflite_age_regression_scale': 80,  
+        'tflite_age_regression_scale': 100,  
         'tflite_age_output_type': 'regression',  
         'tflite_age_class_ranges': [
             "0-2", "3-9", "10-19", "20-29", "30-39", 
@@ -156,29 +153,29 @@ class Config:
 
         # Regras do ensemble para idade: reduzir peso de textura/tradicional
         'ensemble_method_weights': {
-            'tflite_age_regression': 0.70,
-            'tflite_age_classes': 0.70,
-            'cnn_age_regression': 0.30,
-            'facenet_age': 0.30,
-            'texture_analysis_enhanced': 0.02,
-            'traditional_enhanced': 0.01
+            'tflite_age_regression': 0.75,
+            'tflite_age_classes': 0.80,
+            'cnn_age_regression': 0.40,
+            'facenet_age': 0.40,
+            'texture_analysis_enhanced': 0.01,
+            'traditional_enhanced': 0.1
         },
 
         # Votos/limiares adicionais usados no ensemble
-        'child_prob_vote_threshold': 0.78,
-        'elderly_prob_vote_threshold': 0.82,
+        'child_prob_vote_threshold': 0.80,
+        'elderly_prob_vote_threshold': 0.88,
         'child_indicators_vote_threshold': 3.5,
-        'elderly_indicators_vote_threshold': 6.0,
+        'elderly_indicators_vote_threshold': 7.0,
 
         # Salvaguarda: não retornar <18 sem evidência infantil forte
-        'min_adult_age_without_strong_child_evidence': 21,
+        'min_adult_age_without_strong_child_evidence': 23,
     }
 
     FACE_DETECTION_CONFIG = {
-        'merge_iou_threshold': 0.22,
+        'merge_iou_threshold': 0.30,
         'merge_center_threshold': 0.28,
-        'cluster_iou_threshold': 0.28,
+        'cluster_iou_threshold': 0.35,
         'cluster_center_threshold': 0.35,
-        'max_faces': 3,
-        'min_face_size': 40,
+        'max_faces': 2,
+        'min_face_size': 64,
     }

@@ -8,7 +8,7 @@ import hashlib
 from flask_cors import CORS
 from config import Config
 from cache_manager import CacheManager
-from url_services import QRCodeGenerator, URLShortener
+from url_services import QRCodeGenerator
 from utils import InputValidator
 from datetime import datetime
 from analytics_manager import AnalyticsManager
@@ -39,7 +39,7 @@ def bad_request(e):
 
 cache_manager = CacheManager()
 qr_generator = QRCodeGenerator()
-url_shortener = URLShortener()
+
 analytics_manager = AnalyticsManager(cache_manager)
 demographics_detector = AdvancedDemographicsDetector()
 
@@ -182,99 +182,7 @@ def get_qr_base64():
         return jsonify({'error': 'Erro interno do servidor'}), 500
 
 
-@app.route("/api/shorten", methods=["POST"])
-def shorten_url():
-    try:
-        data = request.get_json()
-        url = InputValidator.validate_url(data.get("url"))
-        
-        url_cache_key = cache_manager.generate_key('url_mapping', url)
-        cached_short = cache_manager.get(url_cache_key)
-        
-        
-        def _determine_base_url(req) -> str:
-          
-            if getattr(Config, 'SHORT_BASE_URL', None):
-                base = Config.SHORT_BASE_URL.strip()
-                if not base.endswith('/'):
-                    base += '/'
-                return base
 
-           
-            xf_host = req.headers.get('X-Forwarded-Host')
-            xf_proto = req.headers.get('X-Forwarded-Proto')
-            if xf_host and xf_proto:
-                return f"{xf_proto}://{xf_host}/"
-
-         
-            return req.host_url
-
-        base_url = _determine_base_url(request)
-
-        if cached_short:
-            return jsonify({
-                'short_url': base_url + 's/' + cached_short['short_id'],
-                'cached': True,
-                'created_at': cached_short.get('created_at')
-            })
-        
-        short_data = url_shortener.create_short_url(url, base_url)
-        
-        cache_manager.set(url_cache_key, short_data, expire_hours=8760)
-        cache_manager.set(f"short_id:{short_data['short_id']}", short_data, expire_hours=8760)
-        
-        return jsonify({
-            'short_url': short_data['short_url'],
-            'cached': False,
-            'created_at': short_data['created_at']
-        })
-        
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'error': 'Erro interno do servidor'}), 500
-
-
-@app.route('/s/<short_id>')
-def redirect_short_url(short_id):
-    try:
-        InputValidator.validate_short_id(short_id)
-        
-        cached_data = cache_manager.get(f"short_id:{short_id}")
-        
-        if cached_data:
-          
-            request_data = {
-                'ip': request.environ.get('HTTP_X_FORWARDED_FOR', request.environ.get('REMOTE_ADDR', 'unknown')),
-                'user_agent': request.environ.get('HTTP_USER_AGENT', 'unknown'),
-                'referer': request.environ.get('HTTP_REFERER', 'direct')
-            }
-            analytics_manager.log_url_access(short_id, request_data)
-            
-          
-            updated_data = url_shortener.update_access_count(short_id, cached_data)
-            cache_manager.set(f"short_id:{short_id}", updated_data, expire_hours=8760)
-            
-            return redirect(cached_data['original_url'])
-        
-        url = url_shortener.get_original_url(short_id)
-        if url:
-         
-            request_data = {
-                'ip': request.environ.get('HTTP_X_FORWARDED_FOR', request.environ.get('REMOTE_ADDR', 'unknown')),
-                'user_agent': request.environ.get('HTTP_USER_AGENT', 'unknown'),
-                'referer': request.environ.get('HTTP_REFERER', 'direct')
-            }
-            analytics_manager.log_url_access(short_id, request_data)
-            
-            return redirect(url)
-        
-        return jsonify({'error': 'URL não encontrada'}), 404
-        
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'error': 'Erro interno do servidor'}), 500
 
 
 
@@ -302,34 +210,7 @@ def clear_cache():
         return jsonify({'error': str(e)}), 500
 
 
-@app.route("/api/url/<short_id>/analytics", methods=["GET"])
-def get_url_analytics(short_id):
-   
-    try:
-        InputValidator.validate_short_id(short_id)
-        
-       
-        url_data = cache_manager.get(f"short_id:{short_id}")
-        if not url_data:
-            return jsonify({'error': 'URL não encontrada'}), 404
-        
-       
-        analytics = analytics_manager.get_url_analytics(short_id)
-        
-       
-        analytics['url_info'] = {
-            'short_id': short_id,
-            'original_url': url_data.get('original_url'),
-            'created_at': url_data.get('created_at'),
-            'total_access_count': url_data.get('access_count', 0)
-        }
-        
-        return jsonify(analytics)
-        
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'error': 'Erro interno do servidor'}), 500
+
 
 
 @app.route("/api/analytics/global", methods=["GET"])
@@ -434,7 +315,7 @@ def get_dashboard_data():
             'cache_stats': cache_stats,
             'system_info': {
                 'timestamp': datetime.now().isoformat(),
-                'services_active': ['qr_generator', 'url_shortener', 'demographics_detector'],
+                'services_active': ['qr_generator', 'demographics_detector'],
                 'total_features': 3
             }
         }

@@ -48,12 +48,4 @@ class InputValidator:
         
         return image_data
     
-    @staticmethod
-    def validate_short_id(short_id):
-        if not short_id or len(short_id) != Config.SHORT_URL_LENGTH:
-            raise ValueError("ID de URL inválido")
-        
-        if not re.match(r'^[a-zA-Z0-9]+$', short_id):
-            raise ValueError("ID contém caracteres inválidos")
-        
-        return short_id
+

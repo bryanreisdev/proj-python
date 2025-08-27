@@ -142,6 +142,55 @@ class AdvancedAgeDetector:
         except Exception as _:
             pass
 
+    def _align_by_eyes(self, face_img: np.ndarray) -> np.ndarray:
+        """Alinha o rosto nivelando os olhos usando Haar Cascade de olhos.
+        Retorna a imagem original em caso de falha para manter robustez.
+        """
+        try:
+            gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
+            # Usa haarcascade de olhos do OpenCV
+            eye_cascade_path = getattr(cv2.data, 'haarcascades', '') + 'haarcascade_eye.xml'
+            if not eye_cascade_path or not os.path.exists(eye_cascade_path):
+                return face_img
+            eye_cascade = cv2.CascadeClassifier(eye_cascade_path)
+            eyes = eye_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(12, 12))
+            if eyes is None or len(eyes) < 2:
+                return face_img
+            # Ordena por área e pega os dois maiores
+            eyes_sorted = sorted(eyes, key=lambda r: r[2] * r[3], reverse=True)[:2]
+            # Calcula centros
+            centers = []
+            for (x, y, w, h) in eyes_sorted:
+                centers.append((x + w * 0.5, y + h * 0.5))
+            if len(centers) < 2:
+                return face_img
+            (x1, y1), (x2, y2) = centers[0], centers[1]
+            # Garante que x1 < x2
+            if x2 < x1:
+                x1, y1, x2, y2 = x2, y2, x1, y1
+            dy = y2 - y1
+            dx = x2 - x1
+            if abs(dx) < 1e-6:
+                return face_img
+            angle = math.degrees(math.atan2(dy, dx))
+            # Rotação inversa para nivelar (subtrai o ângulo)
+            h, w = face_img.shape[:2]
+            M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, 1.0)
+            aligned = cv2.warpAffine(face_img, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+            return aligned
+        except Exception:
+            return face_img
+
+    def _preprocess_for_age(self, face_img: np.ndarray) -> np.ndarray:
+        """Pipeline de pré-processamento para idade: alinhamento por olhos + correção de iluminação.
+        """
+        try:
+            img = self._align_by_eyes(face_img)
+            img = self._preprocess_for_skin_tone(img)
+            return img
+        except Exception:
+            return face_img
+
     def _load_or_create_age_model(self):
         model_path = 'models/age_model.h5'
         if os.path.exists(model_path):
@@ -215,23 +264,27 @@ class AdvancedAgeDetector:
             use_ens = bool(getattr(Config, 'AGE_CONFIG', {}).get('use_ensemble_with_tflite', True))
             if getattr(self, '_tflite_age_enabled', False) and not use_ens:
                 try:
-                    return self._predict_with_tflite_age(face_img)
+                    # Pré-processamento completo (alinhamento + CLAHE)
+                    face_img_proc = self._preprocess_for_age(face_img)
+                    return self._predict_with_tflite_age(face_img_proc)
                 except Exception as e:
                     print(f"Erro TFLite idade: {e}")
                     return self._predict_traditional(face_img)
             # fallback antigo: combina para robustez
             predictions: List[Dict[str, Any]] = []
+            # Pré-processamento completo
+            face_img_proc = self._preprocess_for_age(face_img)
             if getattr(self, '_tflite_age_enabled', False):
                 try:
-                    predictions.append(self._predict_with_tflite_age(face_img))
+                    predictions.append(self._predict_with_tflite_age(face_img_proc))
                 except Exception as e:
                     print(f"Erro TFLite idade: {e}")
             try:
-                predictions.append(self._predict_traditional(face_img))
+                predictions.append(self._predict_traditional(face_img_proc))
             except Exception as e:
                 print(f"Erro tradicional idade: {e}")
             try:
-                predictions.append(self._predict_with_texture_analysis(face_img))
+                predictions.append(self._predict_with_texture_analysis(face_img_proc))
             except Exception as e:
                 print(f"Erro textura idade: {e}")
             if predictions:
@@ -260,6 +313,23 @@ class AdvancedAgeDetector:
     def _predict_with_tflite_age(self, face_img: np.ndarray) -> Dict[str, Any]:
         import numpy as np
         try:
+            # Gate de qualidade: tamanho mínimo, nitidez e brilho
+            try:
+                from config import Config
+                min_size = int(getattr(Config, 'FACE_DETECTION_CONFIG', {}).get('min_face_size', 40))
+            except Exception:
+                min_size = 40
+
+            h, w = face_img.shape[:2]
+            if min(h, w) < max(32, min_size):
+                return {'method': 'tflite_age_regression', 'estimated_age': 30, 'confidence': 0.35}
+
+            gray_q = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
+            sharp_q = float(cv2.Laplacian(gray_q, cv2.CV_64F).var())
+            mean_q = float(np.mean(gray_q))
+            if sharp_q < 20.0 or mean_q < 35.0:
+                return {'method': 'tflite_age_regression', 'estimated_age': 30, 'confidence': 0.4}
+
             # Ler dinamicamente o tamanho de entrada do modelo
             inp = self._tflite_age_interpreter.get_input_details()[0]
             out = self._tflite_age_interpreter.get_output_details()[0]
@@ -269,9 +339,9 @@ class AdvancedAgeDetector:
             input_w = int(input_shape[2])
             in_dtype = inp.get('dtype')
 
-            # BGR->RGB e base 0..1
+            # BGR->RGB e base 0..1 (supondo já pré-processado)
             face_rgb = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
-            face_resized = cv2.resize(face_rgb, (input_w, input_h)).astype('float32') / 255.0
+            base_resized = cv2.resize(face_rgb, (input_w, input_h)).astype('float32') / 255.0
 
             def run_inference(x_batch: np.ndarray) -> np.ndarray:
                 self._tflite_age_interpreter.set_tensor(inp['index'], x_batch)
@@ -284,47 +354,91 @@ class AdvancedAgeDetector:
             out_type = age_cfg.get('tflite_age_output_type', 'auto')
 
 
-            if in_dtype and 'uint8' in str(in_dtype).lower():
-                q_scale = float(inp.get('quantization_parameters', {}).get('scales', [1.0])[0] or 1.0)
-                q_zero = int(inp.get('quantization_parameters', {}).get('zero_points', [0])[0] or 0)
-                x_uint8 = np.clip(np.round(face_resized / max(q_scale, 1e-8) + q_zero), 0, 255).astype('uint8')
-                x_uint8 = np.expand_dims(x_uint8, 0)
-                y = run_inference(x_uint8)
-            else:
+            # Test-time augmentation leve: shifts, center e flip
+            aug_images = []
+            base = base_resized.copy()
+            flips = [False, True]
+            shifts = [(0, 0), (2, 2), (-2, -2), (2, -2), (-2, 2)]
+            for do_flip in flips:
+                img = np.flip(base, axis=1) if do_flip else base
+                for dy, dx in shifts:
+                    M = np.float32([[1, 0, dx], [0, 1, dy]])
+                    shifted = cv2.warpAffine((img * 255).astype('uint8'), M, (input_w, input_h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+                    aug_images.append(shifted.astype('float32') / 255.0)
 
-                x01 = np.expand_dims(face_resized, 0)
-                x11 = np.expand_dims(face_resized * 2.0 - 1.0, 0)
-                y01 = run_inference(x01)
-                y11 = run_inference(x11)
-            
-                def conf_of(vec: np.ndarray) -> float:
-                    v = vec.reshape(-1).astype('float32')
-                    if v.size == 1:
-                        return float(abs(v[0] - 0.5))
-                    vv = v - float(np.max(v))
-                    e = np.exp(vv)
-                    p = e / max(1e-8, float(np.sum(e)))
-                    return float(np.max(p))
-                y = y01 if conf_of(y01) >= conf_of(y11) else y11
+            def batch_predict(img_list: List[np.ndarray]) -> List[np.ndarray]:
+                preds = []
+                for im in img_list:
+                    if in_dtype and 'uint8' in str(in_dtype).lower():
+                        q_scale = float(inp.get('quantization_parameters', {}).get('scales', [1.0])[0] or 1.0)
+                        q_zero = int(inp.get('quantization_parameters', {}).get('zero_points', [0])[0] or 0)
+                        x_uint8 = np.clip(np.round(im / max(q_scale, 1e-8) + q_zero), 0, 255).astype('uint8')
+                        x_uint8 = np.expand_dims(x_uint8, 0)
+                        y = run_inference(x_uint8)
+                    else:
+                        x01 = np.expand_dims(im, 0)
+                        x11 = np.expand_dims(im * 2.0 - 1.0, 0)
+                        y01 = run_inference(x01)
+                        y11 = run_inference(x11)
+                        def conf_of(vec: np.ndarray) -> float:
+                            v = vec.reshape(-1).astype('float32')
+                            if v.size == 1:
+                                return float(abs(v[0] - 0.5))
+                            vv = v - float(np.max(v))
+                            e = np.exp(vv)
+                            p = e / max(1e-8, float(np.sum(e)))
+                            return float(np.max(p))
+                        y = y01 if conf_of(y01) >= conf_of(y11) else y11
+                    preds.append(np.array(y))
+                return preds
 
-            if out_type == 'regression' or (out_type == 'auto' and np.size(y) == 1):
-                predicted_age = float(np.squeeze(y))
+            preds = batch_predict(aug_images)
+
+            first_pred = preds[0]
+            first_size = int(np.size(first_pred))
+            if out_type == 'regression' or (out_type == 'auto' and first_size == 1):
+                # Converte lista de saídas para vetor
+                y_vec = np.array([np.squeeze(p).astype('float32') for p in preds]).reshape(-1)
                 reg_scale = float(age_cfg.get('tflite_age_regression_scale', 100.0))
-                if 0.0 <= predicted_age <= 1.0:
-                    predicted_age *= reg_scale
-                predicted_age = max(1, min(99, int(predicted_age)))
+                # Reescala se necessário
+                if np.all((0.0 <= y_vec) & (y_vec <= 1.0)):
+                    y_vec = y_vec * reg_scale
+                # Idade final: mediana para robustez
+                predicted_age = float(np.median(y_vec))
+                predicted_age = max(1, min(99, int(round(predicted_age))))
+                # Dispersão entre TTA
+                tta_std = float(np.std(y_vec))
+                # Confiança base pela distância ao prior + penalidade pela dispersão
                 age_variance = abs(predicted_age - 35) / 35.0
-                confidence = max(0.65, 1.0 - age_variance * 0.28)
+                conf_base = max(0.55, 1.0 - age_variance * 0.28)
+                conf_disp = max(0.0, 1.0 - (tta_std / 6.0))  # std >= 6 anos derruba confiança
+                confidence = max(0.5, min(0.98, 0.5 * conf_base + 0.5 * conf_disp))
+                # Ajuste pela qualidade da imagem (nitidez e brilho)
+                try:
+                    gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
+                    sharp = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+                    sharp_norm = max(0.0, min(1.0, (sharp - 30.0) / 120.0))
+                    mean_b = float(np.mean(gray))
+                    bright_norm = max(0.0, min(1.0, (mean_b - 60.0) / 80.0))
+                    qual = 0.6 * sharp_norm + 0.4 * bright_norm
+                    confidence = max(0.5, min(0.98, confidence * (0.7 + 0.3 * qual)))
+                except Exception:
+                    pass
                 return {
                     'method': 'tflite_age_regression',
                     'estimated_age': predicted_age,
                     'confidence': float(confidence)
                 }
             else:
-                vec = np.array(y).reshape(-1).astype('float32')
-                vv = vec - float(np.max(vec))
-                e = np.exp(vv)
-                probs = e / max(1e-8, float(np.sum(e)))
+                # Média de probabilidades nas TTA e mediana do centro
+                vecs = [np.array(p).reshape(-1).astype('float32') for p in preds]
+                # Softmax por amostra
+                probs_list = []
+                for v in vecs:
+                    vv = v - float(np.max(v))
+                    e = np.exp(vv)
+                    probs_list.append(e / max(1e-8, float(np.sum(e))))
+                probs = np.mean(np.stack(probs_list, axis=0), axis=0)
                 class_idx = int(np.argmax(probs))
                 class_prob = float(np.max(probs))
                 class_ranges = age_cfg.get('tflite_age_class_ranges', [
@@ -337,11 +451,16 @@ class AdvancedAgeDetector:
                     a, b = r.split('-')
                     return (int(a) + int(b)) // 2
                 estimated_age = _mid_of_range(age_range)
+                # Consistência entre TTA: desvio das probabilidades do topo
+                top_probs = [float(np.max(p)) for p in probs_list]
+                disp = float(np.std(np.array(top_probs)))
+                conf_disp = max(0.0, 1.0 - disp / 0.2)
+                confidence = float(max(0.6, min(0.95, 0.5 * class_prob + 0.5 * conf_disp)))
                 return {
                     'method': 'tflite_age_classes',
                     'estimated_age': int(estimated_age),
                     'age_range': age_range,
-                    'confidence': float(max(0.6, min(0.95, class_prob)))
+                    'confidence': confidence
                 }
         except Exception as e:
             print(f"Erro no TFLite age: {e}")
@@ -816,19 +935,19 @@ class AdvancedAgeDetector:
             elif face_roundness < 0.80:
                 elderly_indicators += 0.5
 
-            if gray_hair_score > 0.18:
-             
-                if wrinkle_detection >= 0.35:
-                    hair_boost = 0.6 + (gray_hair_score * 1.2)
-                    if skin_elasticity < 0.50:
-                        hair_boost += 0.4
+            if gray_hair_score > 0.28:
+                # Só reforçar idoso com cabelo grisalho quando há sinais faciais coerentes
+                if (wrinkle_detection >= 0.45 and skin_elasticity < 0.50) or (wrinkle_detection >= 0.55):
+                    hair_boost = 0.4 + (gray_hair_score * 1.0)
+                    if skin_elasticity < 0.40:
+                        hair_boost += 0.3
                     elderly_indicators += max(0.0, hair_boost)
                 else:
-                    # Sem rugas, efeito quase nulo
-                    elderly_indicators += gray_hair_score * 0.1
-                # Atenuar se muitos indicadores de criança
-                if child_indicators >= 2.0:
-                    elderly_indicators -= min(elderly_indicators * 0.5, 1.0)
+                    # Sem rugas marcantes: contribuição mínima para evitar viés pró-idoso
+                    elderly_indicators += gray_hair_score * 0.05
+                # Atenuar se houver sinais juvenis
+                if child_indicators >= 2.0 or face_smoothness > 0.80:
+                    elderly_indicators -= min(elderly_indicators * 0.6, 1.2)
             
             # Gating anti-idoso: muitos sinais juvenis reduzem idoso
             if child_indicators >= 3.0 and wrinkle_detection < 0.25:
@@ -955,11 +1074,7 @@ class AdvancedAgeDetector:
         return min(1.0, total_wrinkle_score)
     
     def _detect_gray_hair(self, face_img: np.ndarray, gray: np.ndarray) -> float:
-        """Detecta indícios de cabelos brancos/grisalhos acima da testa.
-        
-        Combina critérios de brilho e saturação (HSV), neutralidade (LAB)
-        e presença de mechas claras com bordas. Retorna score [0,1].
-        """
+    
         try:
             h, w = gray.shape
             if h == 0 or w == 0:
@@ -982,26 +1097,26 @@ class AdvancedAgeDetector:
             if band_bgr is not None and band_bgr.size > 0:
                 hsv = cv2.cvtColor(band_bgr, cv2.COLOR_BGR2HSV)
                 _, s, v = cv2.split(hsv)
-                # Evita falso positivo por estouro de brilho/saturação alta
-                high_v = (v > 190).astype(np.float32)
+              
+                high_v = (v > 200).astype(np.float32)
                 low_s = (s < 35).astype(np.float32)
-                high_s_block = (s > 80).astype(np.float32)
+                high_s_block = (s > 70).astype(np.float32)
                 hsv_ratio = float(np.mean(high_v * low_s))
-                hsv_ratio = hsv_ratio * (1.0 - float(np.mean(high_s_block)) * 0.7)
-                components.append(min(1.0, max(0.0, hsv_ratio) * 1.2))
+                hsv_ratio = hsv_ratio * (1.0 - float(np.mean(high_s_block)) * 0.8)
+                components.append(min(1.0, max(0.0, hsv_ratio) * 1.0))
 
                 lab = cv2.cvtColor(band_bgr, cv2.COLOR_BGR2LAB)
                 L, A, B = cv2.split(lab)
-                high_L = (L > 205).astype(np.float32)
-                near_neutral = ((np.abs(A - 128) < 9) & (np.abs(B - 128) < 9)).astype(np.float32)
+                high_L = (L > 210).astype(np.float32)
+                near_neutral = ((np.abs(A - 128) < 8) & (np.abs(B - 128) < 8)).astype(np.float32)
                 lab_ratio = float(np.mean(high_L * near_neutral))
-                components.append(min(1.0, lab_ratio * 1.1))
+                components.append(min(1.0, lab_ratio * 1.0))
 
             try:
-                edges = cv2.Canny(band_gray, 50, 130)
-                bright = (band_gray > 205).astype(np.uint8) * 255
+                edges = cv2.Canny(band_gray, 60, 150)
+                bright = (band_gray > 210).astype(np.uint8) * 255
                 bright_edges = cv2.bitwise_and(edges, bright)
-                strands_ratio = float(np.sum(bright_edges > 0) / max(1, bright_edges.size)) * 3.2
+                strands_ratio = float(np.sum(bright_edges > 0) / max(1, bright_edges.size)) * 3.0
                 components.append(min(1.0, strands_ratio))
             except Exception:
                 pass
@@ -1009,7 +1124,12 @@ class AdvancedAgeDetector:
             if not components:
                 return 0.0
 
-            return float(np.clip(np.mean(components), 0.0, 1.0))
+            score = float(np.clip(np.mean(components), 0.0, 1.0))
+            # Penaliza possíveis falsos positivos quando há muita pele/brilho homogêneo
+            uniformity = float(np.std(band_gray.astype(np.float32))) if band_gray.size > 0 else 20.0
+            if uniformity < 15.0:
+                score *= 0.7
+            return score
         except Exception:
             return 0.0
 
@@ -1019,10 +1139,10 @@ class AdvancedAgeDetector:
         elasticity_scores = []
         
         regions = [
-            gray[int(h*0.2):int(h*0.4), int(w*0.3):int(w*0.7)],  # Testa
-            gray[int(h*0.4):int(h*0.6), int(w*0.1):int(w*0.4)],  # Bochecha esquerda
-            gray[int(h*0.4):int(h*0.6), int(w*0.6):int(w*0.9)],  # Bochecha direita
-            gray[int(h*0.6):int(h*0.8), int(w*0.3):int(w*0.7)]   # Queixo
+            gray[int(h*0.2):int(h*0.4), int(w*0.3):int(w*0.7)],  
+            gray[int(h*0.4):int(h*0.6), int(w*0.1):int(w*0.4)], 
+            gray[int(h*0.4):int(h*0.6), int(w*0.6):int(w*0.9)],  
+            gray[int(h*0.6):int(h*0.8), int(w*0.3):int(w*0.7)]   
         ]
         
         for region in regions:
@@ -1060,16 +1180,16 @@ class AdvancedAgeDetector:
         if elasticity_scores:
             overall_elasticity = np.mean(elasticity_scores)
             
-            if overall_elasticity > 0.8:
+            if overall_elasticity > 0.9:
                 return 0.9  # Pele muito elástica (criança/jovem)
-            elif overall_elasticity > 0.6:
+            elif overall_elasticity > 0.7:
                 return 0.7  # Pele elástica (adulto jovem)
-            elif overall_elasticity > 0.4:
+            elif overall_elasticity > 0.5:
                 return 0.5  # Pele moderadamente elástica (adulto)
-            elif overall_elasticity > 0.2:
+            elif overall_elasticity > 0.3:
                 return 0.3  # Pele pouco elástica (meia-idade)
             else:
-                return 0.1  # Pele muito pouco elástica (idoso)
+                return 0.2  # Pele muito pouco elástica (idoso)
         
         return 0.5
     
@@ -1123,6 +1243,7 @@ class AdvancedAgeDetector:
             elderly_evidence = 0.0
             child_probs: List[float] = []
             elderly_probs: List[float] = []
+            youth_probs: List[float] = []
             child_votes = 0
             elderly_votes = 0
             adult_votes = 0
@@ -1161,6 +1282,9 @@ class AdvancedAgeDetector:
                 ep = pred.get('elderly_probability')
                 if isinstance(ep, (int, float)) and not np.isnan(ep) and not np.isinf(ep):
                     elderly_probs.append(float(ep))
+                yp = pred.get('youth_probability')
+                if isinstance(yp, (int, float)) and not np.isnan(yp) and not np.isinf(yp):
+                    youth_probs.append(float(yp))
 
                 # Votos por faixa etária
                 from config import Config
@@ -1171,8 +1295,20 @@ class AdvancedAgeDetector:
                 elderly_ind_thr = float(age_cfg.get('elderly_indicators_vote_threshold', 2.5))
                 if age <= 16 or (pred.get('child_indicators', 0.0) >= child_ind_thr) or (pred.get('child_probability', 0.0) >= child_prob_vote_thr):
                     child_votes += 1
-                elif age >= 65 or (pred.get('elderly_indicators', 0.0) >= elderly_ind_thr) or (pred.get('elderly_probability', 0.0) >= elderly_prob_vote_thr):
-                    elderly_votes += 1
+                elif (
+                    (age >= 68) or
+                    (pred.get('elderly_indicators', 0.0) >= elderly_ind_thr) or
+                    (pred.get('elderly_probability', 0.0) >= elderly_prob_vote_thr)
+                ):
+                    # Anti-idoso: não votar idoso se houver sinais juvenis/infantis moderados
+                    if (
+                        pred.get('child_indicators', 0.0) < 2.5 and
+                        pred.get('child_probability', 0.0) < 0.60 and
+                        pred.get('youth_probability', 0.0) < 0.65
+                    ):
+                        elderly_votes += 1
+                    else:
+                        adult_votes += 1
                 else:
                     adult_votes += 1
             
@@ -1186,6 +1322,7 @@ class AdvancedAgeDetector:
             # Reforços baseados em evidência forte, com salvaguardas para não saturar 16 anos
             mean_child_prob = float(np.mean(child_probs)) if child_probs else 0.0
             mean_elderly_prob = float(np.mean(elderly_probs)) if elderly_probs else 0.0
+            mean_youth_prob = float(np.mean(youth_probs)) if youth_probs else 0.0
 
             from config import Config
             age_cfg = getattr(Config, 'AGE_CONFIG', {})
@@ -1218,11 +1355,14 @@ class AdvancedAgeDetector:
                 # Aplica elderly cap similarmente, evitando puxar adultos
                 apply_elderly_cap = elderly_cap_enabled and (
                     (mean_elderly_prob >= elderly_cap_prob_thr and elderly_votes >= elderly_cap_min_votes) or (elderly_votes >= elderly_cap_strict_votes)
-                ) and (final_age >= elderly_cap_weighted_floor) and (child_votes == 0 and mean_child_prob < 0.40)
+                ) and (final_age >= elderly_cap_weighted_floor) and (child_votes == 0 and mean_child_prob < 0.40) and (mean_youth_prob < 0.55)
                 if apply_elderly_cap:
                     if final_age < elderly_cap_min_age:
                         final_age = elderly_cap_min_age
-                    final_confidence = min(0.92, max(final_confidence, 0.72) + 0.08)
+                    # Se evidência de idoso for bem forte, permita puxar um pouco mais a idade
+                    if mean_elderly_prob >= (elderly_cap_prob_thr + 0.08) and elderly_votes >= (elderly_cap_min_votes + 1):
+                        final_age = max(final_age, elderly_cap_min_age + 2)
+                    final_confidence = min(0.94, max(final_confidence, 0.74) + 0.08)
 
             # Piso adulto sem evidência infantil forte
             try:
@@ -1340,7 +1480,7 @@ def convert_numpy_types(obj):
 
 class AdvancedGenderDetector:
     def __init__(self):
-        # Verifica se o modo somente TFLite está ativo
+   
         tflite_only = False
         try:
             from config import Config
@@ -1364,15 +1504,13 @@ class AdvancedGenderDetector:
         self._embedding_cache = {}
         self._prediction_cache = {}
         self._cache_size_limit = 50  # Limite do cache
-
-        # TFLite opcional
         self._tflite_enabled = False
         try:
             from config import Config
             cfg = getattr(Config, 'GENDER_CONFIG', {})
             if cfg.get('use_tflite', False):
                 import os
-                # Fallback: tenta tflite_runtime e, se indisponível, usa TensorFlow Lite
+            
                 InterpreterClass = None
                 try:
                     import tflite_runtime.interpreter as tflite
@@ -1387,7 +1525,7 @@ class AdvancedGenderDetector:
                 self._tflite_threads = int(cfg.get('tflite_threads', 2))
                 self._tflite_gender_path = cfg.get('tflite_gender_model_path', 'models/gender.tflite')
                 self._tflite_embed_path = cfg.get('tflite_embedding_model_path', 'models/face_embedding.tflite')
-                # Garantir modelo TFLite de gênero (gera caso ausente/vazio)
+           
                 def _ensure_tflite_gender_model():
                     try:
                         need_create = (not os.path.exists(self._tflite_gender_path)) or (os.path.getsize(self._tflite_gender_path) == 0)
@@ -1406,7 +1544,6 @@ class AdvancedGenderDetector:
                         print(f"Falha ao gerar modelo TFLite de gênero: {err}")
                 _ensure_tflite_gender_model()
 
-                # Carregar interpreters conforme disponibilidade
                 self._tflite_gender = None
                 self._tflite_embed = None
                 if os.path.exists(self._tflite_gender_path) and os.path.getsize(self._tflite_gender_path) > 0:
@@ -1429,9 +1566,7 @@ class AdvancedGenderDetector:
                         print(f"[TFLite Embed] input shape={e_in.get('shape')} dtype={e_in.get('dtype')} output shape={e_out.get('shape')} dtype={e_out.get('dtype')}")
                     except Exception:
                         pass
-                # Habilita TFLite se ao menos um dos modelos estiver disponível
                 self._tflite_enabled = (self._tflite_gender is not None) or (self._tflite_embed is not None)
-                # Flag para logar detalhes TFLite apenas uma vez
                 self._tflite_gender_logged_once = False
                 if not self._tflite_enabled:
                     print("[TFLite] Aviso: nenhum intérprete TFLite carregado (verifique os arquivos em /app/models)")
@@ -1439,18 +1574,18 @@ class AdvancedGenderDetector:
             print(f"TFLite desabilitado: {e}")
         
     def _cleanup_cache(self):
-        """Limpa cache quando atinge o limite"""
+       
         if len(self._prediction_cache) > self._cache_size_limit:
-            # Remove metade dos itens mais antigos
+           
             items_to_remove = len(self._prediction_cache) // 2
             cache_keys = list(self._prediction_cache.keys())
             for key in cache_keys[:items_to_remove]:
                 del self._prediction_cache[key]
         
     def _setup_predict_functions(self):
-        """Configura funções de predição otimizadas para evitar retracing"""
+       
         if self.ml_enabled and hasattr(self, 'gender_model'):
-            # Criar função de predição otimizada
+           
             import tensorflow as tf
             
             @tf.function(reduce_retracing=True)
@@ -1460,26 +1595,21 @@ class AdvancedGenderDetector:
             self._optimized_predict = optimized_predict
         
     def _compute_facial_hair_features_for_image(self, face_img: np.ndarray) -> Dict[str, float]:
-        """Extrai rapidamente indicadores de pelos faciais diretamente da imagem.
-
-        Retorna chaves compatíveis com regras já usadas no classificador avançado:
-        - beard_coverage_ratio, stubble_score, mustache_score, jaw_darkness_ratio,
-          lip_color_contrast, soft_tissue_distribution, avg_brightness_norm
-        """
+        
         try:
             is_color = len(face_img.shape) == 3 and face_img.shape[2] == 3
             gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY) if is_color else face_img
             h, w = gray.shape if len(gray.shape) == 2 else (0, 0)
             features: Dict[str, float] = {}
 
-            # Brilho médio normalizado
+           
             try:
                 features['avg_brightness_norm'] = float(np.mean(gray) / 255.0)
             except Exception:
                 features['avg_brightness_norm'] = 0.5
 
             if h <= 0 or w <= 0:
-                # valores neutros
+               
                 features.update({
                     'beard_coverage_ratio': 0.0,
                     'stubble_score': 0.0,
@@ -1490,7 +1620,7 @@ class AdvancedGenderDetector:
                 })
                 return features
 
-            # Região mandíbula
+           
             jaw_region = gray[int(h*0.58):h, int(w*0.08):int(w*0.92)]
             if jaw_region.size > 0:
                 try:
@@ -1501,7 +1631,7 @@ class AdvancedGenderDetector:
                 jaw_edges = cv2.Canny(jaw_region, 30, 100)
                 beard_coverage_ratio = float(np.sum(jaw_edges > 0) / max(1, jaw_edges.size))
                 beard_coverage_ratio = float(min(1.0, beard_coverage_ratio * 3.0))
-                # Comparar escuridão mandíbula vs bochechas
+               
                 try:
                     cheek_left = gray[int(h*0.45):int(h*0.65), int(w*0.10):int(w*0.35)]
                     cheek_right = gray[int(h*0.45):int(h*0.65), int(w*0.65):int(w*0.90)]
@@ -1523,7 +1653,7 @@ class AdvancedGenderDetector:
                 beard_coverage_ratio = 0.0
                 jaw_darkness_ratio = 0.0
 
-            # Bigode
+           
             mustache_region = gray[int(h*0.50):int(h*0.62), int(w*0.30):int(w*0.70)]
             if mustache_region.size > 0:
                 try:
@@ -1534,7 +1664,7 @@ class AdvancedGenderDetector:
             else:
                 mustache_score = 0.0
 
-            # Lábios vs pele inferior (contraste como proxy de maquiagem/traços femininos)
+           
             lip_region_g = gray[int(h*0.62):int(h*0.82), int(w*0.25):int(w*0.75)]
             lower_skin_region_g = gray[int(h*0.62):int(h*0.82), int(w*0.05):int(w*0.20)] if w > 0 else lip_region_g
             if lip_region_g.size > 0 and lower_skin_region_g.size > 0:
@@ -1545,7 +1675,7 @@ class AdvancedGenderDetector:
             else:
                 lip_color_contrast = 0.0
 
-            # Suavidade da bochecha como proxy de tecido mole
+
             cheek_left = gray[int(h*0.45):int(h*0.65), int(w*0.10):int(w*0.35)]
             cheek_right = gray[int(h*0.45):int(h*0.65), int(w*0.65):int(w*0.90)]
             cheek_softness = 0.0
@@ -1617,7 +1747,7 @@ class AdvancedGenderDetector:
     
     def detect_gender_advanced(self, face_img: np.ndarray) -> Dict[str, Any]:
         if not self.ml_enabled:
-            # Mesmo sem TensorFlow completo, tentar TFLite se disponível
+           
             if getattr(self, '_tflite_enabled', False):
                 try:
                     return self._predict_with_tflite(face_img)
@@ -1641,7 +1771,7 @@ class AdvancedGenderDetector:
     def _predict_with_tflite(self, face_img: np.ndarray) -> Dict[str, Any]:
         try:
             import numpy as np
-            # Read input shape and dtype from model
+           
             ih, iw = 160, 160
             in_dtype = None
             if getattr(self, '_tflite_gender', None) is not None:
@@ -1650,7 +1780,7 @@ class AdvancedGenderDetector:
                 ih, iw = int(shp[1]), int(shp[2])
                 in_dtype = g_inp.get('dtype')
 
-            # Prepare base float image 0..1
+           
             face_rgb = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
             face_resized = cv2.resize(face_rgb, (iw, ih)).astype('float32') / 255.0
 
@@ -1659,10 +1789,10 @@ class AdvancedGenderDetector:
                 self._tflite_gender.invoke()
                 g_raw = self._tflite_gender.get_tensor(self._tflite_gender.get_output_details()[0]['index'])
                 g_pred = np.squeeze(g_raw)
-                # scalar or 2-class
+               
                 if g_pred.shape == () or isinstance(g_pred, (float, np.floating)):
                     return float(g_pred)
-                # stable softmax
+               
                 vec = g_pred.reshape(-1).astype('float32')
                 vec = vec - float(np.max(vec))
                 expv = np.exp(vec)
@@ -1676,7 +1806,7 @@ class AdvancedGenderDetector:
             male_probability = None
 
             if getattr(self, '_tflite_gender', None) is not None:
-                # Quantized input
+               
                 if in_dtype and 'uint8' in str(in_dtype).lower():
                     inp = self._tflite_gender.get_input_details()[0]
                     scale = float(inp.get('quantization_parameters', {}).get('scales', [1.0])[0] or 1.0)
@@ -1685,7 +1815,7 @@ class AdvancedGenderDetector:
                     x_uint8 = np.expand_dims(x_uint8, 0)
                     male_probability = run_inference(x_uint8)
                 else:
-                    # Try 0..1 and -1..1, pick better margin from threshold
+                   
                     x01 = np.expand_dims(face_resized, 0)
                     x11 = np.expand_dims(face_resized * 2.0 - 1.0, 0)
                     mp01 = run_inference(x01)
@@ -1701,10 +1831,10 @@ class AdvancedGenderDetector:
             mp = (male_probability if male_probability is not None else 0.5)
             if invert:
                 mp = 1.0 - mp
-            # Ajuste leve baseado em pelos faciais (barba/bigode) diretamente da imagem
+
             try:
                 fh = self._compute_facial_hair_features_for_image(face_img)
-                # Reuso das regras configuráveis já existentes para reforço de barba
+               
                 beard_thr = cfg.get('beard_coverage_threshold', 0.12)
                 stubble_thr_mod = cfg.get('stubble_moderate_threshold', 0.65)
                 stubble_thr_str = cfg.get('stubble_strong_threshold', 0.85)
@@ -1790,7 +1920,7 @@ class AdvancedGenderDetector:
             
             geometric_adjustment = self._get_geometric_gender_adjustment(face_img)
             
-            # Menor peso para ajuste geométrico para reduzir falsos masculinos em mulheres
+           
             from config import Config
             male_w = getattr(Config, 'GENDER_CONFIG', {}).get('facenet_male_weight', 0.90)
             geo_w = getattr(Config, 'GENDER_CONFIG', {}).get('facenet_geometric_weight', 0.10)
@@ -1802,7 +1932,7 @@ class AdvancedGenderDetector:
             confidence_raw = abs(final_probability - 0.5) * 2
             confidence = max(getattr(Config, 'GENDER_CONFIG', {}).get('confidence_min_facenet', 0.65), min(0.95, confidence_raw))
             
-            # Limiar mais conservador para classificar como masculino
+
             threshold = getattr(Config, 'GENDER_CONFIG', {}).get('facenet_threshold', 0.56)
             gender = 'Masculino' if final_probability > threshold else 'Feminino'
             
@@ -1858,36 +1988,36 @@ class AdvancedGenderDetector:
                 'hormonal_markers': float(np.mean(embedding[490:512]))
             }
             
-            # Análise adicional da imagem
+           
             is_color = len(face_img.shape) == 3 and face_img.shape[2] == 3
             gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY) if is_color else face_img
             hsv = cv2.cvtColor(face_img, cv2.COLOR_BGR2HSV) if is_color else None
             h, w = gray.shape if len(gray.shape) == 2 else (0, 0)
-            # Brilho médio normalizado como feature auxiliar
+           
             try:
                 features['avg_brightness_norm'] = float(np.mean(gray) / 255.0)
             except Exception:
                 features['avg_brightness_norm'] = 0.5
             
-            # Análise de textura para detectar pelos faciais
+           
             sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
             sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
             edge_intensity = np.mean(np.sqrt(sobelx**2 + sobely**2))
             features['edge_intensity'] = float(edge_intensity)
 
-            # Novos parâmetros robustos baseados em regiões faciais
+           
             if h > 0 and w > 0:
-                # Região da mandíbula (barba/sombra)
+               
                 jaw_region = gray[int(h*0.58):h, int(w*0.08):int(w*0.92)]
                 if jaw_region.size > 0:
                     jaw_lap = cv2.Laplacian(jaw_region, cv2.CV_64F).var()
                     stubble_score = min(2.0, jaw_lap / 130.0)
-                    # Cobertura de barba por densidade de bordas
+                   
                     jaw_edges = cv2.Canny(jaw_region, 30, 100)
                     beard_coverage_ratio = float(np.sum(jaw_edges > 0) / max(1, jaw_edges.size))
                     features['beard_coverage_ratio'] = float(min(1.0, beard_coverage_ratio * 3.0))
                     features['stubble_score'] = float(stubble_score)
-                    # Razão de escuridão da mandíbula vs bochechas (ajuda a diferenciar barba real de sombra)
+                   
                     try:
                         cheek_left = gray[int(h*0.45):int(h*0.65), int(w*0.10):int(w*0.35)]
                         cheek_right = gray[int(h*0.45):int(h*0.65), int(w*0.65):int(w*0.90)]
@@ -1910,7 +2040,7 @@ class AdvancedGenderDetector:
                     features['beard_coverage_ratio'] = 0.0
                     features['jaw_darkness_ratio'] = 0.0
 
-                # Região das sobrancelhas e olhos
+               
                 eyebrow_region = gray[int(h*0.12):int(h*0.35), int(w*0.10):int(w*0.90)]
                 eye_region = gray[int(h*0.30):int(h*0.50), int(w*0.20):int(w*0.80)]
                 if eyebrow_region.size > 0:
@@ -1926,14 +2056,14 @@ class AdvancedGenderDetector:
                     features['eyebrow_verticality'] = 0.0
                     features['eyebrow_thickness'] = 0.0
 
-                # Distância sobrancelha-olho (aproximação)
+               
                 eye_brow_gap_ratio = 0.0
                 if h > 0:
                     gap_px = max(0, int(h*0.35) - int(h*0.30))
                     eye_brow_gap_ratio = min(2.0, (gap_px / max(1.0, h)) / 0.12)
                 features['eye_brow_gap_ratio'] = float(eye_brow_gap_ratio)
 
-                # Lábios: contraste de cor vs pele ao redor (grayscale e HSV)
+               
                 lip_region_g = gray[int(h*0.62):int(h*0.82), int(w*0.25):int(w*0.75)]
                 lower_skin_region_g = gray[int(h*0.62):int(h*0.82), int(w*0.05):int(w*0.20)] if w > 0 else lip_region_g
                 if lip_region_g.size > 0 and lower_skin_region_g.size > 0:
@@ -1944,7 +2074,7 @@ class AdvancedGenderDetector:
                 else:
                     features['lip_color_contrast'] = 0.0
 
-                # Contraste de saturação/valor em HSV para lábios
+
                 lip_saturation_contrast = 0.0
                 if hsv is not None:
                     lip_region_hsv = hsv[int(h*0.62):int(h*0.82), int(w*0.25):int(w*0.75)]
@@ -1957,7 +2087,7 @@ class AdvancedGenderDetector:
                         lip_saturation_contrast = max(0.0, (lip_sat - skin_sat) + 0.3 * (lip_val - skin_val))
                 features['lip_saturation_contrast'] = float(min(2.0, lip_saturation_contrast))
 
-                # Bigode: região entre nariz e lábio superior
+               
                 mustache_region = gray[int(h*0.50):int(h*0.62), int(w*0.30):int(w*0.70)]
                 if mustache_region.size > 0:
                     mustache_lap = cv2.Laplacian(mustache_region, cv2.CV_64F).var()
@@ -1966,7 +2096,7 @@ class AdvancedGenderDetector:
                 else:
                     features['mustache_score'] = 0.0
 
-                # Maçãs do rosto: proeminência por gradiente
+                                        
                 cheek_left = gray[int(h*0.45):int(h*0.65), int(w*0.10):int(w*0.35)]
                 cheek_right = gray[int(h*0.45):int(h*0.65), int(w*0.65):int(w*0.90)]
                 cheekbone_grad = 0.0
