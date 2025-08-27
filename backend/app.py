@@ -1,4 +1,5 @@
 from flask import Flask, request, send_file, jsonify, redirect
+import time
 import os
 import gc
 import concurrent.futures
@@ -36,6 +37,31 @@ def bad_request(e):
         'error': 'Requisição inválida',
         'error_code': 'BAD_REQUEST'
     }), 400
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({
+        'error': 'Endpoint não encontrado',
+        'error_code': 'NOT_FOUND'
+    }), 404
+
+@app.errorhandler(500)
+def server_error(e):
+    return jsonify({
+        'error': 'Erro interno do servidor',
+        'error_code': 'INTERNAL_SERVER_ERROR'
+    }), 500
+
+@app.errorhandler(Exception)
+def unhandled(e):
+    try:
+        msg = str(e)
+    except Exception:
+        msg = 'Unhandled'
+    return jsonify({
+        'error': msg,
+        'error_code': 'UNHANDLED_EXCEPTION'
+    }), 500
 
 cache_manager = CacheManager()
 qr_generator = QRCodeGenerator()
@@ -225,7 +251,6 @@ def get_global_analytics():
 
 @app.route("/api/demographics", methods=["POST"])
 def detect_demographics():
-
     try:
        
         content_length = request.content_length
@@ -266,7 +291,10 @@ def detect_demographics():
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(demographics_detector.analyze_demographics, image_data)
             try:
+                start = time.time()
                 result = future.result(timeout=TIMEOUT_SECONDS)
+                duration = time.time() - start
+                app.logger.info(f"/api/demographics took {duration:.2f}s")
             except concurrent.futures.TimeoutError:
                 return jsonify({
                     'error': 'Análise demográfica excedeu o tempo limite. Tente com uma imagem menor ou mais simples.',

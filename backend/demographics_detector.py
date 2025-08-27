@@ -354,11 +354,15 @@ class AdvancedAgeDetector:
             out_type = age_cfg.get('tflite_age_output_type', 'auto')
 
 
-            # Test-time augmentation leve: shifts, center e flip
+            # Test-time augmentation leve: shifts, center e flip (modo rápido reduzido)
             aug_images = []
             base = base_resized.copy()
             flips = [False, True]
-            shifts = [(0, 0), (2, 2), (-2, -2), (2, -2), (-2, 2)]
+            try:
+                fast_mode = bool(age_cfg.get('fast_mode', False))
+            except Exception:
+                fast_mode = False
+            shifts = [(0, 0), (2, 2)] if fast_mode else [(0, 0), (2, 2), (-2, -2), (2, -2), (-2, 2)]
             for do_flip in flips:
                 img = np.flip(base, axis=1) if do_flip else base
                 for dy, dx in shifts:

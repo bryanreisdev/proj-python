@@ -115,6 +115,7 @@ class Config:
         'age_margin_default': 1,
         'age_margin_child': 1,
         'age_margin_elderly': 2,
+        'fast_mode': True,  # Modo rápido para TTA reduzir inferências
 
 
         'child_cap_enabled': False,
